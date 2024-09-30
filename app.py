@@ -23,7 +23,7 @@ JWT_SECRET = st.secrets["JWT_SECRET"]
 # Función para generar un JWT para el success_url
 def generate_jwt_token():
     payload = {
-        "url": "https://correctorgramatical.streamlit.app/?success=true",
+        "url": "https://grammarchecker.streamlit.app/?success=true",
         "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)  # Expiración del token (30 minutos)
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -53,8 +53,8 @@ def create_checkout_session(price_id):
                 "quantity": 1,
             }],
             mode="payment",
-            success_url=f"https://correctorgramatical.streamlit.app/?token={token}",  # Usar el token JWT en el success URL
-            cancel_url="https://correctorgramatical.streamlit.app/?cancel=true",
+            success_url=f"https://grammarchecker.streamlit.app/?token={token}",  # Usar el token JWT en el success URL
+            cancel_url="https://grammarchecker.streamlit.app/?cancel=true",
         )
         return session
     except Exception as e:
