@@ -7,32 +7,55 @@ import requests
 import jwt
 import datetime
 from docx.oxml.ns import qn
+import logging
+import streamlit.components.v1 as components
 
-# Set full-width layout
-st.set_page_config(layout="wide")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Set full-width layout and page title
+st.set_page_config(layout="wide", page_title="Corrector de Documentos DOCX")
 
 # Configurar la clave secreta de Stripe desde Streamlit Secrets
 stripe.api_key = st.secrets["STRIPE_SECRET_KEY"]  # Acceder a Stripe secret desde Streamlit secrets
 
-# ID del producto para Stripe (reemplazar con tu ID de producto)
-PRODUCT_ID = "prod_QwZPXT67PV3srt"  # Reemplazar con tu Stripe product ID
+# ID del producto para Stripe (almacenado en Streamlit Secrets)
+PRODUCT_ID = st.secrets["STRIPE_PRODUCT_ID"]  # Asegúrate de agregar STRIPE_PRODUCT_ID en tus secrets
 
 # Obtener JWT_SECRET desde Streamlit secrets
 JWT_SECRET = st.secrets["JWT_SECRET"]
 
+# Webhook secret para Stripe (agregar STRIPE_WEBHOOK_SECRET en Streamlit Secrets)
+STRIPE_WEBHOOK_SECRET = st.secrets.get("STRIPE_WEBHOOK_SECRET", "")
+
 # Función para generar un JWT para el success_url
 def generate_jwt_token():
     payload = {
-        "url": "https://grammarchecker.streamlit.app/?success=true",
+        "paid": True,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)  # Expiración del token (30 minutos)
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
     return token
 
+# Función para verificar el token JWT
+def verify_jwt_token(token):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        if payload.get("paid"):
+            return True
+        return False
+    except jwt.ExpiredSignatureError:
+        st.error("El token ha expirado.")
+        return False
+    except jwt.InvalidTokenError:
+        st.error("Token inválido.")
+        return False
+
 # Función para obtener el precio del producto
 def get_price_for_product(product_id):
     try:
-        prices = stripe.Price.list(product=product_id)
+        prices = stripe.Price.list(product=product_id, active=True)
         if prices and prices['data']:
             return prices['data'][0].id
         else:
@@ -40,6 +63,7 @@ def get_price_for_product(product_id):
             return None
     except Exception as e:
         st.error(f"Error al obtener el precio: {e}")
+        logger.error(f"Error al obtener el precio: {e}")
         return None
 
 # Función para crear una sesión de pago con Stripe
@@ -53,19 +77,27 @@ def create_checkout_session(price_id):
                 "quantity": 1,
             }],
             mode="payment",
-            success_url=f"https://grammarchecker.streamlit.app/?token={token}",  # Usar el token JWT en el success URL
-            cancel_url="https://grammarchecker.streamlit.app/?cancel=true",
+            success_url=f"{st.secrets['APP_URL']}/?token={token}",  # Usar el token JWT en el success URL
+            cancel_url=f"{st.secrets['APP_URL']}/?cancel=true",
         )
+        logger.info("Sesión de pago creada exitosamente.")
         return session
     except Exception as e:
         st.error(f"Error al crear la sesión de pago: {e}")
+        logger.error(f"Error al crear la sesión de pago: {e}")
         return None
 
-# Función para conectar con la API de LanguageTool y aplicar correcciones
+# Función para conectar con la API de LanguageTool y aplicar correcciones (procesamiento por lotes)
 def correct_text_with_languagetool(text, language):
     languagetool_url = "https://api.languagetool.org/v2/check"
     language_codes = {
-        "en": "en-US", "es": "es", "fr": "fr", "de": "de", "pt": "pt"
+        "en": "en-US",
+        "es": "es",
+        "fr": "fr",
+        "de": "de",
+        "pt": "pt",
+        "it": "it",  # Agregado Italiano
+        # Agregar más idiomas si es necesario
     }
 
     params = {
@@ -73,7 +105,7 @@ def correct_text_with_languagetool(text, language):
         'language': language_codes.get(language, "en-US"),
         'level': 'picky',  # Usar el nivel "picky" para aplicar más correcciones
         'enabledCategories': 'grammar,style,typos',  # Habilitar correcciones gramaticales, de estilo y tipográficas
-        'enabledRules': 'WHITESPACE_RULE,EN_UNPAIRED_BRACKETS,UPPERCASE_SENTENCE_START,WORDINESS,REDUNDANCY,MISSING_COMMA,COMMA_PARENTHESIS_WHITESPACE,DASH_RULE,EN_QUOTES,AGREEMENT_SENT_START,SENTENCE_FRAGMENT,MULTIPLICATION_SIGN,PASSIVE_VOICE,EXTRA_WHITESPACE,COMMA_BEFORE_CONJUNCTION,HYPHENATION_RULES,ITS_IT_IS,DUPLICATE_WORD,NO_SPACE_BEFORE_PUNCTUATION',  # Más reglas de estilo y claridad
+        'enabledRules': 'WHITESPACE_RULE,EN_UNPAIRED_BRACKETS,UPPERCASE_SENTENCE_START,WORDINESS,REDUNDANCY,MISSING_COMMA,COMMA_PARENTHESIS_WHITESPACE,DASH_RULE,EN_QUOTES,AGREEMENT_SENT_START,SENTENCE_FRAGMENT,MULTIPLICATION_SIGN,PASSIVE_VOICE,EXTRA_WHITESPACE,COMMA_BEFORE_CONJUNCTION,HYPHENATION_RULES,ITS_IT_IS,DUPLICATE_WORD,NO_SPACE_BEFORE_PUNCTUATION',
         'disabledCategories': 'COLLOQUIALISMS'  # Deshabilitar lenguaje coloquial para precisión científica
     }
 
@@ -85,9 +117,11 @@ def correct_text_with_languagetool(text, language):
             return corrected_text
         else:
             st.error("Error en la respuesta de la API de LanguageTool.")
+            logger.error(f"LanguageTool API Error: {response.status_code} - {response.text}")
             return text
     except requests.exceptions.RequestException as e:
         st.error(f"Error en la solicitud de la API: {e}")
+        logger.error(f"Error en la solicitud de la API de LanguageTool: {e}")
         return text
 
 # Función para aplicar correcciones al texto
@@ -102,19 +136,36 @@ def apply_corrections(text, matches):
 
     corrected_text = text
     offset = 0
-    for start_pos, end_pos, replacement in sorted(corrections):
+    for start_pos, end_pos, replacement in sorted(corrections, key=lambda x: x[0]):
         corrected_text = corrected_text[:start_pos + offset] + replacement + corrected_text[end_pos + offset:]
         offset += len(replacement) - (end_pos - start_pos)
     return corrected_text
 
-# Función para manejar el procesamiento de un párrafo
-def process_paragraph(paragraph, language):
-    if paragraph_contains_footnote_reference(paragraph):
-        return  # Omitir párrafos con notas al pie
+# Función para manejar el procesamiento de un documento completo
+def process_document(document, language):
+    full_text = []
+    footnote_indices = []
+    for paragraph in document.paragraphs:
+        if not paragraph_contains_footnote_reference(paragraph):
+            full_text.append(paragraph.text)
+        else:
+            footnote_indices.append(len(full_text))
+            full_text.append(paragraph.text)
 
-    full_text = "".join([run.text for run in paragraph.runs])
-    corrected_paragraph_text = correct_text_with_languagetool(full_text, language)
-    apply_corrected_text_to_runs(paragraph, corrected_paragraph_text)
+    text_to_correct = "\n".join(full_text)
+    corrected_text = correct_text_with_languagetool(text_to_correct, language)
+
+    if corrected_text == text_to_correct:
+        st.warning("No se realizaron correcciones.")
+        return document
+
+    corrected_paragraphs = corrected_text.split("\n")
+
+    for i, paragraph in enumerate(document.paragraphs):
+        if not paragraph_contains_footnote_reference(paragraph):
+            paragraph.text = corrected_paragraphs[i]
+
+    return document
 
 # Función para verificar si un párrafo contiene una referencia de nota al pie
 def paragraph_contains_footnote_reference(paragraph):
@@ -124,27 +175,21 @@ def paragraph_contains_footnote_reference(paragraph):
                 return True
     return False
 
-# Función para aplicar el texto corregido a las runs de un párrafo
-def apply_corrected_text_to_runs(paragraph, corrected_text):
-    current_index = 0
-    for run in paragraph.runs:
-        text_length = len(run.text)
-        run.text = corrected_text[current_index:current_index + text_length]
-        current_index += text_length
-
-# Función para verificar el token JWT desde la URL
-def verify_jwt_token(token):
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        if payload.get("url") == "https://grammarchecker.streamlit.app/?success=true":
-            return True
-        return False
-    except jwt.ExpiredSignatureError:
-        st.error("El token ha expirado.")
-        return False
-    except jwt.InvalidTokenError:
-        st.error("Token inválido.")
-        return False
+# Función para renderizar el botón de pago con Stripe
+def render_payment_button(session_url):
+    components.html(
+        f"""
+        <script>
+            function redirectToStripe() {{
+                window.location.href = "{session_url}";
+            }}
+        </script>
+        <button onclick="redirectToStripe()" style="background-color:#6772E5; color:white; padding: 10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px;">
+            Pagar con Stripe
+        </button>
+        """,
+        height=60,
+    )
 
 # Función principal de la aplicación Streamlit
 def main():
@@ -198,69 +243,78 @@ def main():
         st.title("Corrección Ortográfica y Gramatical de Documentos DOCX con Preservación de Notas al Pie")
 
         # Obtener parámetros de la URL
-        success = st.experimental_get_query_params().get("token")
-        if success:
-            token = success[0]  # Obtener el token de la URL
+        query_params = st.experimental_get_query_params()
+        token = query_params.get("token", [None])[0]
+        cancel = query_params.get("cancel", [False])[0]
+
+        if cancel:
+            st.error("Pago cancelado. Por favor, intenta nuevamente.")
+            # Limpiar los parámetros de la URL
+            st.experimental_set_query_params()
+            return
+
+        if token:
             if verify_jwt_token(token):
                 st.success("¡Pago completado! Ahora puedes subir y procesar tu documento.")
+                # Limpiar los parámetros de la URL
+                st.experimental_set_query_params()
             else:
                 st.error("Token inválido. Por favor, completa el pago nuevamente.")
+                # Limpiar los parámetros de la URL
+                st.experimental_set_query_params()
+                return
         else:
             st.warning("Debes completar el pago antes de usar la aplicación.")
-
-            # 1. Incluir un ícono o botón más visible para iniciar el pago con Stripe
-            # Utilizamos una imagen de "Pay with Stripe" que redirige al usuario al enlace de pago
-            pay_button_html = """
-                <a href="{url}">
-                    <img src="https://upload.wikimedia.org/wikipedia/commons/5/53/Stripe_Logo%2C_revised_2016.svg" alt="Pay with Stripe" width="200">
-                </a>
-            """
             price_id = get_price_for_product(PRODUCT_ID)
             if price_id:
                 session = create_checkout_session(price_id)
                 if session:
-                    # Renderizar el botón con la imagen y el enlace de pago
-                    st.markdown(pay_button_html.format(url=session.url), unsafe_allow_html=True)
+                    render_payment_button(session.url)
+            return  # No permitir continuar sin pago
 
-        # 2. Permitir la carga de archivos y selección de idioma solo después del pago
-        if success and verify_jwt_token(success[0]):
-            language = st.selectbox("Selecciona el idioma del documento", ["en", "es", "fr", "de", "pt"])
+        # Permitir la carga de archivos y selección de idioma solo después del pago
+        language = st.selectbox("Selecciona el idioma del documento", ["en", "es", "fr", "it", "de", "pt"])
 
-            uploaded_file = st.file_uploader("Sube un archivo DOCX", type="docx")
+        uploaded_file = st.file_uploader("Sube un archivo DOCX", type="docx")
 
-            if uploaded_file is not None:
-                try:
-                    # Intentar abrir el archivo para verificar que es un DOCX válido
-                    document = docx.Document(uploaded_file)
-                except Exception as e:
-                    st.error("El archivo subido no es un DOCX válido o está dañado.")
-                else:
-                    if st.button("Enviar"):
-                        try:
-                            progress_bar = st.progress(0)
-                            total_paragraphs = len(document.paragraphs)
+        if uploaded_file is not None:
+            try:
+                # Intentar abrir el archivo para verificar que es un DOCX válido
+                document = docx.Document(uploaded_file)
+                st.success("Documento cargado exitosamente.")
+            except Exception as e:
+                st.error("El archivo subido no es un DOCX válido o está dañado.")
+                logger.error(f"Error al abrir el documento: {e}")
+            else:
+                if st.button("Enviar"):
+                    try:
+                        progress_bar = st.progress(0)
+                        total_steps = 3  # Carga, procesamiento, descarga
+                        progress_bar.progress(1 / total_steps)
 
-                            for i, paragraph in enumerate(document.paragraphs):
-                                process_paragraph(paragraph, language)
-                                progress_bar.progress((i + 1) / total_paragraphs)
+                        # Procesar el documento
+                        corrected_document = process_document(document, language)
+                        progress_bar.progress(2 / total_steps)
 
-                            corrected_file = BytesIO()
-                            document.save(corrected_file)
-                            corrected_file.seek(0)
+                        # Guardar el documento corregido en BytesIO
+                        corrected_file = BytesIO()
+                        corrected_document.save(corrected_file)
+                        corrected_file.seek(0)
 
-                            st.download_button(
-                                label="Descargar documento corregido",
-                                data=corrected_file,
-                                file_name="documento_corregido.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
+                        progress_bar.progress(3 / total_steps)
+                        progress_bar.empty()
 
-                            st.success("¡Documento procesado y descargado exitosamente!")
-                        except Exception as e:
-                            st.error(f"Ocurrió un error al procesar el documento: {e}")
-                        finally:
-                            # Eliminar el flag de éxito y regresar al estado original
-                            st.experimental_set_query_params()  # Esto borra todos los parámetros de consulta
+                        st.download_button(
+                            label="Descargar documento corregido",
+                            data=corrected_file,
+                            file_name="documento_corregido.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
+
+                        st.success("¡Documento procesado y descargado exitosamente!")
+                    except Exception as e:
+                        st.error(f"Ocurrió un error al procesar el documento: {e}")
+                        logger.error(f"Error al procesar el documento: {e}")
 
 if __name__ == "__main__":
     main()
