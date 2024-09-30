@@ -10,30 +10,36 @@ from docx.oxml.ns import qn
 import logging
 import streamlit.components.v1 as components
 
-# Configure logging
+# Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Set full-width layout and page title
+# Configurar la página
 st.set_page_config(layout="wide", page_title="Corrector de Documentos DOCX")
 
-# Configurar la clave secreta de Stripe desde Streamlit Secrets
-stripe.api_key = st.secrets["STRIPE_SECRET_KEY"]  # Acceder a Stripe secret desde Streamlit secrets
+# Configurar Stripe API Key desde secretos
+stripe.api_key = st.secrets["STRIPE_SECRET_KEY"]
 
-# ID del producto para Stripe (almacenado en Streamlit Secrets)
-PRODUCT_ID = st.secrets["STRIPE_PRODUCT_ID"]  # Asegúrate de agregar STRIPE_PRODUCT_ID en tus secrets
+# ID del producto de Stripe desde secretos
+PRODUCT_ID = st.secrets["STRIPE_PRODUCT_ID"]
 
-# Obtener JWT_SECRET desde Streamlit secrets
+# Obtener JWT_SECRET desde secretos
 JWT_SECRET = st.secrets["JWT_SECRET"]
 
-# Webhook secret para Stripe (agregar STRIPE_WEBHOOK_SECRET en Streamlit Secrets)
+# Obtener APP_URL desde secretos
+APP_URL = st.secrets.get("APP_URL", None)
+if not APP_URL:
+    st.error("La clave 'APP_URL' no está configurada en los secretos de Streamlit.")
+    st.stop()
+
+# Obtener Webhook Secret (si está configurado)
 STRIPE_WEBHOOK_SECRET = st.secrets.get("STRIPE_WEBHOOK_SECRET", "")
 
-# Función para generar un JWT para el success_url
+# Función para generar un token JWT
 def generate_jwt_token():
     payload = {
         "paid": True,
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)  # Expiración del token (30 minutos)
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
     return token
@@ -60,6 +66,7 @@ def get_price_for_product(product_id):
             return prices['data'][0].id
         else:
             st.error("No se encontraron precios para el producto.")
+            logger.error("No se encontraron precios para el producto.")
             return None
     except Exception as e:
         st.error(f"Error al obtener el precio: {e}")
@@ -69,7 +76,7 @@ def get_price_for_product(product_id):
 # Función para crear una sesión de pago con Stripe
 def create_checkout_session(price_id):
     try:
-        token = generate_jwt_token()  # Generar el token JWT para el success URL
+        token = generate_jwt_token()
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             line_items=[{
@@ -77,17 +84,31 @@ def create_checkout_session(price_id):
                 "quantity": 1,
             }],
             mode="payment",
-            success_url=f"{st.secrets['APP_URL']}/?token={token}",  # Usar el token JWT en el success URL
-            cancel_url=f"{st.secrets['APP_URL']}/?cancel=true",
+            success_url=f"{APP_URL}/?token={token}",
+            cancel_url=f"{APP_URL}/?cancel=true",
         )
-        logger.info("Sesión de pago creada exitosamente.")
+        logger.info(f"Sesión de pago creada exitosamente: {session.url}")
         return session
     except Exception as e:
         st.error(f"Error al crear la sesión de pago: {e}")
         logger.error(f"Error al crear la sesión de pago: {e}")
         return None
 
-# Función para conectar con la API de LanguageTool y aplicar correcciones (procesamiento por lotes)
+# Función para renderizar el botón de pago (Opción 1: Enlace Directo)
+def render_payment_button(session_url):
+    st.markdown(f"[Pagar con Stripe]({session_url})", unsafe_allow_html=True)
+
+# Función alternativa para renderizar el botón de pago (Opción 2: Botón con JS)
+def render_payment_button_js(session_url):
+    if st.button("Pagar con Stripe"):
+        js = f"""
+            <script>
+                window.location.href = "{session_url}";
+            </script>
+        """
+        components.html(js)
+
+# Función para conectar con la API de LanguageTool y aplicar correcciones
 def correct_text_with_languagetool(text, language):
     languagetool_url = "https://api.languagetool.org/v2/check"
     language_codes = {
@@ -96,17 +117,16 @@ def correct_text_with_languagetool(text, language):
         "fr": "fr",
         "de": "de",
         "pt": "pt",
-        "it": "it",  # Agregado Italiano
-        # Agregar más idiomas si es necesario
+        "it": "it",
     }
 
     params = {
         'text': text,
         'language': language_codes.get(language, "en-US"),
-        'level': 'picky',  # Usar el nivel "picky" para aplicar más correcciones
-        'enabledCategories': 'grammar,style,typos',  # Habilitar correcciones gramaticales, de estilo y tipográficas
+        'level': 'picky',
+        'enabledCategories': 'grammar,style,typos',
         'enabledRules': 'WHITESPACE_RULE,EN_UNPAIRED_BRACKETS,UPPERCASE_SENTENCE_START,WORDINESS,REDUNDANCY,MISSING_COMMA,COMMA_PARENTHESIS_WHITESPACE,DASH_RULE,EN_QUOTES,AGREEMENT_SENT_START,SENTENCE_FRAGMENT,MULTIPLICATION_SIGN,PASSIVE_VOICE,EXTRA_WHITESPACE,COMMA_BEFORE_CONJUNCTION,HYPHENATION_RULES,ITS_IT_IS,DUPLICATE_WORD,NO_SPACE_BEFORE_PUNCTUATION',
-        'disabledCategories': 'COLLOQUIALISMS'  # Deshabilitar lenguaje coloquial para precisión científica
+        'disabledCategories': 'COLLOQUIALISMS'
     }
 
     try:
@@ -175,22 +195,6 @@ def paragraph_contains_footnote_reference(paragraph):
                 return True
     return False
 
-# Función para renderizar el botón de pago con Stripe
-def render_payment_button(session_url):
-    components.html(
-        f"""
-        <script>
-            function redirectToStripe() {{
-                window.location.href = "{session_url}";
-            }}
-        </script>
-        <button onclick="redirectToStripe()" style="background-color:#6772E5; color:white; padding: 10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px;">
-            Pagar con Stripe
-        </button>
-        """,
-        height=60,
-    )
-
 # Función principal de la aplicación Streamlit
 def main():
     # Barra lateral con instrucciones y configuración de pago con Stripe
@@ -237,7 +241,7 @@ def main():
         """)
 
     # Columna principal para el contenido interactivo
-    col_main, _ = st.columns([3, 1])  # Ajuste para centrar el contenido principal
+    col_main, _ = st.columns([3, 1])
 
     with col_main:
         st.title("Corrección Ortográfica y Gramatical de Documentos DOCX con Preservación de Notas al Pie")
@@ -269,7 +273,10 @@ def main():
             if price_id:
                 session = create_checkout_session(price_id)
                 if session:
-                    render_payment_button(session.url)
+                    # Mostrar la URL de la sesión para depuración
+                    st.write(f"URL de la sesión de Stripe: {session.url}")
+                    # Usar una de las opciones de renderizado de botón
+                    render_payment_button(session.url)  # O usa render_payment_button_js(session.url)
             return  # No permitir continuar sin pago
 
         # Permitir la carga de archivos y selección de idioma solo después del pago
