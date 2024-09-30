@@ -136,7 +136,7 @@ def apply_corrected_text_to_runs(paragraph, corrected_text):
 def verify_jwt_token(token):
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        if payload.get("url") == "https://correctorgramatical.streamlit.app/?success=true":
+        if payload.get("url") == "https://grammarchecker.streamlit.app/?success=true":
             return True
         return False
     except jwt.ExpiredSignatureError:
