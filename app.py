@@ -15,7 +15,7 @@ st.set_page_config(layout="wide")
 stripe.api_key = st.secrets["STRIPE_SECRET_KEY"]  # Acceder a Stripe secret desde Streamlit secrets
 
 # ID del producto para Stripe (reemplazar con tu ID de producto)
-PRODUCT_ID = "prod_Qw7Ye65kBkYZas"  # Reemplazar con tu Stripe product ID
+PRODUCT_ID = "prod_QwZPXT67PV3srt"  # Reemplazar con tu Stripe product ID
 
 # Obtener JWT_SECRET desde Streamlit secrets
 JWT_SECRET = st.secrets["JWT_SECRET"]
