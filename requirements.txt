@@ -1,2 +1,6 @@
 streamlit
+python-docx
+language-tool-python
+python-dotenv
 stripe
+PyJWT
